@@ -1,12 +1,12 @@
 services:
-  orderly:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: orderly
-    ports:
-      - "8080:8080"
-    restart: unless-stopped
+  # orderly:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: orderly
+  #   ports:
+  #     - "8080:8080"
+  #   restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:v2.54.0

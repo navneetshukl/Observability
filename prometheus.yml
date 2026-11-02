@@ -6,7 +6,8 @@ scrape_configs:
   # Job for the orderly application
   - job_name: 'orderly'
     static_configs:
-      - targets: ['orderly:8080']
+      # - targets: ['orderly:8080']
+        - targets: ['192.168.1.9:8080']
 
   # Job for Prometheus to scrape itself
   - job_name: 'prometheus'
