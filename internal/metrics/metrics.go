@@ -16,3 +16,12 @@ var OrdersFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "orderly_orders_failed_total",
 	Help: "Total number of order creations that failed.",
 })
+
+// HttpRequestsTotal is a counter vector that tracks total HTTP requests by method, endpoint, and status.
+var HttpRequestsTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "http_requests_total",
+		Help: "Total HTTP requests",
+	},
+	[]string{"method", "endpoint", "status"},
+)
