@@ -33,8 +33,6 @@ func CreateOrder(c *gin.Context) {
 	// ~5% random failures
 	if rand.Intn(100) < 5 {
 		metrics.OrdersFailedTotal.Inc()
-		metrics.HttpRequestsTotal.WithLabelValues("POST", "/orders", "500").Inc()
-
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -42,7 +40,6 @@ func CreateOrder(c *gin.Context) {
 	var o Order
 	if err := c.ShouldBindJSON(&o); err != nil {
 		metrics.OrdersFailedTotal.Inc()
-		metrics.HttpRequestsTotal.WithLabelValues("POST", "/orders", "400").Inc()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
 		return
 	}
@@ -62,7 +59,6 @@ func GetOrder(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		metrics.OrdersFailedTotal.Inc()
-		metrics.HttpRequestsTotal.WithLabelValues("GET", "/orders/:id", "400").Inc()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad id"})
 		return
 	}
@@ -73,19 +69,16 @@ func GetOrder(c *gin.Context) {
 
 	if !ok {
 		metrics.OrdersFailedTotal.Inc()
-		metrics.HttpRequestsTotal.WithLabelValues("GET", "/orders/:id", "404").Inc()
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 
 	metrics.OrdersCreatedTotal.Inc()
-	metrics.HttpRequestsTotal.WithLabelValues("GET", "/orders/:id", "200").Inc()
 	c.JSON(http.StatusOK, o)
 }
 
 // Health handles GET /health - returns 200 OK.
 func Health(c *gin.Context) {
 	metrics.OrdersCreatedTotal.Inc()
-	metrics.HttpRequestsTotal.WithLabelValues("GET", "/health", "200").Inc()
 	c.Status(http.StatusOK)
 }
