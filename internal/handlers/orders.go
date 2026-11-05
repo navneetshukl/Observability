@@ -1,29 +1,24 @@
 package handlers
 
 import (
+	"context"
 	"math/rand"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
+	"orderly/internal/database"
 	"orderly/internal/metrics"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Order represents an order in the system.
-type Order struct {
-	ID     int     `json:"id"`
-	Item   string  `json:"item"`
-	Amount float64 `json:"amount"`
-}
+var db *database.DB
 
-var (
-	mu     sync.Mutex
-	orders = map[int]Order{}
-	nextID = 1
-)
+// InitDB initializes the database connection for handlers.
+func InitDB(database *database.DB) {
+	db = database
+}
 
 // CreateOrder handles POST /orders - creates an order with artificial latency and ~5% failure rate.
 func CreateOrder(c *gin.Context) {
@@ -37,21 +32,25 @@ func CreateOrder(c *gin.Context) {
 		return
 	}
 
-	var o Order
+	var o database.Order
 	if err := c.ShouldBindJSON(&o); err != nil {
 		metrics.OrdersFailedTotal.Inc()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
 		return
 	}
 
-	mu.Lock()
-	o.ID = nextID
-	nextID++
-	orders[o.ID] = o
-	mu.Unlock()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	order, err := db.CreateOrder(ctx, o.Item, o.Amount)
+	if err != nil {
+		metrics.OrdersFailedTotal.Inc()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order"})
+		return
+	}
 
 	metrics.OrdersCreatedTotal.Inc()
-	c.JSON(http.StatusCreated, o)
+	c.JSON(http.StatusCreated, order)
 }
 
 // GetOrder handles GET /orders/:id - returns the order or 404.
@@ -63,22 +62,26 @@ func GetOrder(c *gin.Context) {
 		return
 	}
 
-	mu.Lock()
-	o, ok := orders[id]
-	mu.Unlock()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
 
-	if !ok {
+	order, err := db.GetOrder(ctx, id)
+	if err != nil {
+		if err == database.ErrOrderNotFound {
+			metrics.OrdersFailedTotal.Inc()
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
 		metrics.OrdersFailedTotal.Inc()
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get order"})
 		return
 	}
 
-	metrics.OrdersCreatedTotal.Inc()
-	c.JSON(http.StatusOK, o)
+	// Note: GetOrder doesn't increment OrdersCreatedTotal - only successful creates do
+	c.JSON(http.StatusOK, order)
 }
 
 // Health handles GET /health - returns 200 OK.
 func Health(c *gin.Context) {
-	metrics.OrdersCreatedTotal.Inc()
 	c.Status(http.StatusOK)
 }

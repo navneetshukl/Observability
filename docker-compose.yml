@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orderly
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orderly"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # orderly:
   #   build:
   #     context: .
@@ -6,6 +24,12 @@ services:
   #   container_name: orderly
   #   ports:
   #     - "8080:8080"
+  #   environment:
+  #     DATABASE_URL: postgres://postgres:postgres@postgres:5432/orderly?sslmode=disable
+  #     # SLOW_DB: "true"  # Uncomment to enable slow database mode for failure experiment
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
   #   restart: unless-stopped
 
   prometheus:
@@ -24,4 +48,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   prometheus_data:

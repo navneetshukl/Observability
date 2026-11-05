@@ -231,11 +231,6 @@ Why this design: histograms can be **aggregated across instances**. If you have 
 
 ---
 
-When you finish, send me:
-- `docker-compose.yml`, `prometheus.yml`, and the `Dockerfile` (Milestone 2)
-- Your middleware and histogram definition, plus the cardinality experiment numbers (Milestone 3)
-- Your answers to the questions
-
 
 # Milestone 4: PromQL fundamentals
 
@@ -345,3 +340,176 @@ Most PromQL confusion comes from not knowing which type you have. A typical patt
 3. Why must `le` be preserved in a `histogram_quantile` query?
 4. For step 13, what does the average hide that the p95 shows? Give a concrete production scenario.
 5. If the scrape interval is 15s, what's the smallest sensible range window for `rate()`, and why?
+
+# Milestone 5: Gauges, Summaries, and Dependency Metrics
+
+## Requirements
+
+Keep the Go changes small. The point is the metrics, not the SQL.
+
+### 1. Add PostgreSQL
+
+- Add a `postgres` service to Docker Compose with a named volume and a healthcheck. Make `orderly` wait for it to be healthy.
+- Replace the in-memory map with a single `orders` table using `database/sql` and a Postgres driver (`pgx` stdlib or `lib/pq`).
+- Only two operations: insert an order, and get an order by ID.
+- The connection string comes from an environment variable.
+- Set a **deliberately small pool**: `SetMaxOpenConns(5)` plus sensible `SetMaxIdleConns`. You will push it to its limit on purpose.
+
+### 2. In-flight requests (Gauge)
+
+- `orderly_http_requests_in_flight`: the number of requests currently being handled.
+- Implement it in your existing middleware.
+
+### 3. Connection pool metrics
+
+Expose these from `db.Stats()`:
+
+- Open connections, in-use connections, idle connections
+- Total number of waits for a connection
+- Total time spent waiting for a connection
+- Max open connections (config value, so you can compute utilization)
+
+Decide for each one whether it is a Gauge or a Counter. This is the key decision of the task.
+
+### 4. DB query latency, two ways
+
+| Metric | Type | Labels |
+|---|---|---|
+| `orderly_db_query_duration_seconds` | Histogram | `operation` (`insert_order`, `get_order`) |
+| `orderly_db_query_duration_summary_seconds` | Summary (objectives 0.5, 0.9, 0.99) | `operation` |
+
+Observe both from the same code path so the numbers are comparable.
+
+### 5. Build info
+
+- Gauge `orderly_build_info` with constant value `1` and labels such as `version` and `go_version`.
+- A Gauge for the process start time in unix seconds.
+
+### 6. Failure experiments (temporary code or env flags)
+
+- **Slow database:** add an env flag that makes the insert slower (a `pg_sleep` in the query, or a sleep in Go before the query). Raise your load generator's concurrency to 30-50 workers.
+- **Goroutine leak:** add a temporary `POST /debug/leak` that starts N goroutines which block forever. Call it repeatedly while watching metrics. Remove this endpoint afterwards and never ship an endpoint like it.
+
+---
+
+## Concepts You Should Understand
+
+### Gauge
+
+A value that can go up and down: temperature, queue length, in-flight requests, memory in use. A counter tells you how many times something happened. A gauge tells you what the state is right now.
+
+Common mistakes:
+
+- Using a gauge for something you should count. If you track "total errors" in a gauge and the process restarts, you lose information with no reset detection.
+- Using `rate()` on a gauge. It is meaningless.
+
+### Gauges are snapshots
+
+Prometheus sees a gauge only at each scrape. If in-flight requests spike for 2 seconds between 15-second scrapes, you never see the spike. Mitigations:
+
+- Scrape more often.
+- Use `max_over_time()` for gauges that already summarize.
+- Expose a counter or histogram of the thing you care about (for example, time spent waiting).
+
+### Two ways to expose a gauge
+
+1. **Stateful:** you call `Inc()`, `Dec()` or `Set()` as things happen (in-flight requests). Always `Dec()` in a `defer`, or a panic leaks the count forever.
+2. **Computed at scrape time:** a `GaugeFunc` or `CounterFunc` calls a function when Prometheus scrapes (pool stats). No drift, and no goroutines needed to update values.
+
+Implement the pool metrics yourself first, then compare with the ready-made `collectors.NewDBStatsCollector` in the client library.
+
+### In-flight requests and saturation
+
+A rate tells you how busy you are. In-flight requests tell you how *loaded* you are. They are linked by **Little's Law**:
+
+```
+in-flight ≈ request rate × average latency
+```
+
+If latency doubles at a constant rate, in-flight doubles. A growing in-flight gauge is often the earliest sign that a downstream dependency is slowing down, before errors appear.
+
+### The USE method
+
+RED is for what your service *serves*. USE is for *resources*: **U**tilization, **S**aturation, **E**rrors.
+
+For a DB connection pool:
+
+- **Utilization:** in-use connections / max open connections
+- **Saturation:** how many requests are waiting for a connection, and for how long
+- **Errors:** connection failures and timeouts
+
+Pool exhaustion is a classic production incident: latency goes up and requests queue while the database itself looks healthy. Only the saturation metrics show it.
+
+### Cumulative vs instantaneous stats
+
+Look at the fields of `sql.DBStats`. Some describe the current state and some accumulate since the process started. The Prometheus type you choose must match the semantics of the value.
+
+### Why instrument dependencies?
+
+When your API gets slow, the first question is "is it us or something we depend on?" Metrics for outgoing calls (DB, cache, other services) answer it in seconds. The pattern: RED for each dependency, plus USE for the pools and clients that connect to it.
+
+### Summary vs Histogram
+
+| | Histogram | Summary |
+|---|---|---|
+| Where quantiles are computed | Prometheus server, at query time (`histogram_quantile`) | Your application, at observation time |
+| Aggregation across instances | Yes, bucket counters can be summed | **No**, percentiles can't be meaningfully averaged or added |
+| Choose quantiles later | Yes | No, fixed in code |
+| Accuracy | Estimated, depends on buckets | More precise for configured quantiles |
+| Cost | One series per bucket | One series per quantile, plus sliding-window computation in the app |
+
+Most production teams default to histograms because services run as many instances and aggregation matters. Summaries fit single-instance cases or when you need accurate quantiles and accept the limits. Newer Prometheus versions also support *native histograms*, which reduce the bucket-design problem. You do not need them here, but know they exist.
+
+### Goroutine leaks
+
+`go_goroutines` normally oscillates around a baseline. A leak is a steady upward trend that never comes back down, often caused by a missing context cancellation or an unclosed channel. Production alerts for this usually use a trend (`deriv()` or `predict_linear()`), not a fixed threshold.
+
+---
+
+## Hints
+
+- Useful constructors: `promauto.NewGauge`, `NewGaugeFunc`, `NewCounterFunc`, `NewSummaryVec` (see `SummaryOpts.Objectives`).
+- Timing both metrics: take one `time.Now()` at the start, compute one duration, and call both `Observe()` with the same value.
+- `sql.DBStats` fields: `MaxOpenConnections`, `OpenConnections`, `InUse`, `Idle`, `WaitCount`, `WaitDuration`. Check the docs for which are cumulative.
+- `WaitDuration` is a `time.Duration`. Convert it to seconds (base-unit convention).
+- In-flight gauge: increment on entry, `defer` the decrement, and don't count `/metrics` itself.
+- Postgres healthcheck: `pg_isready`. Use `depends_on` with `condition: service_healthy`.
+- Register pool metrics once at startup, not in the request path.
+
+---
+
+## PromQL Tasks
+
+Add these to your `queries.md`, each with a one-line explanation.
+
+1. Current in-flight requests, and the maximum over the last 5 minutes (`max_over_time`).
+2. Pool utilization as a ratio (in-use / max open).
+3. Average time spent waiting for a connection: rate of wait duration / rate of wait count. Handle a denominator of 0.
+4. Rate of connection waits per second.
+5. p95 query latency per `operation` from the histogram, and the same quantile from the summary, on one graph.
+6. Little's Law check: compare in-flight with `rate(requests) × average latency`.
+7. Goroutine trend: `deriv(go_goroutines[5m])`, and a `predict_linear` projection 30 minutes ahead.
+8. Time since the process started, from your start-time gauge.
+
+---
+
+## How to Verify
+
+1. **Baseline:** with light traffic, in-flight is small, pool utilization is low, and the wait count is flat.
+2. **Pool exhaustion:** enable the slow-query flag and raise concurrency to 30-50 workers. You should see, in this order: utilization hit 100%, the wait count start rising, the in-flight gauge climb, and p95 on both the HTTP histogram and the DB histogram go up. Write down the order in which they moved and what each told you.
+3. **Summary vs Histogram:** p95 from both should be close but not identical. Explain why.
+4. **Goroutine leak:** call `/debug/leak` a few times. Goroutines should climb and stay up, and the `deriv` query should be clearly positive. Restart the app and note that it resets.
+5. **Cross-check:** `curl localhost:8080/metrics` and confirm the pool gauges match `db.Stats()` at that moment.
+6. **Cleanup:** remove the leak endpoint, turn off the slow flag, and confirm metrics return to baseline.
+
+---
+
+## Questions to Answer
+
+1. Which `DBStats` fields did you make Gauges and which Counters, and why?
+2. During the pool-exhaustion test, which metric changed first, and which would have been the best early warning in production?
+3. Why can't you average p99 values from 10 instances to get a fleet-wide p99, and which metric type avoids the problem?
+4. You scrape every 15 seconds and a gauge spikes for 3 seconds between scrapes. What can you do about it?
+5. Why must `Dec()` on the in-flight gauge be in a `defer`?
+6. Why is "in-flight requests" a better early indicator of a slow dependency than error rate?
+

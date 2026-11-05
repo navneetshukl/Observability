@@ -30,6 +30,10 @@ func MetricsMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// Increment in-flight requests gauge
+		metrics.HttpRequestsInFlight.Inc()
+		defer metrics.HttpRequestsInFlight.Dec()
+
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: c.Writer, statusCode: http.StatusOK}
 		c.Writer = rw
