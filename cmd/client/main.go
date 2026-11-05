@@ -84,6 +84,6 @@ func main() {
 		var created2 Order
 		json.NewDecoder(resp.Body).Decode(&created2)
 		fmt.Printf("Created: %+v (status: %d)\n", created2, resp.StatusCode)
-		time.Sleep(1 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 }

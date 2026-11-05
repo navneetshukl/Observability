@@ -236,4 +236,112 @@ When you finish, send me:
 - Your middleware and histogram definition, plus the cardinality experiment numbers (Milestone 3)
 - Your answers to the questions
 
-I'll review them before we start **Milestone 4: PromQL fundamentals**, where you'll learn why the queries in step 2 above work.
+
+# Milestone 4: PromQL fundamentals
+
+## Learning objectives
+- Understand how Prometheus data is structured (series, samples, selectors) and how PromQL evaluates over it.
+- Write RED queries for rate, error ratio, and latency percentiles, and understand why each one is written the way it is.
+- Use aggregation, label matching, and range functions correctly, and avoid the classic mistakes.
+
+## Requirements
+
+There's no new Go code in this milestone. Keep the load generator running continuously, and work in the Prometheus UI (`localhost:9090/graph`). Write each query yourself and record it in a file `queries.md` with a one-line explanation of what it returns and why it's written that way.
+
+**Part A: Selectors and data types**
+1. Select all series of `orderly_http_requests_total`.
+2. Filter to POST requests only. Then to 5xx responses only (hint: regex matcher). Then to everything *except* `/health`.
+3. Run the same selector with `[1m]` appended. Note the type of the result in the UI (range vector) and why it can't be graphed directly.
+
+**Part B: Counters and rates**
+4. Requests per second across the whole service.
+5. Requests per second broken down by `path`, then by `path` and `status`.
+6. Orders created per minute (a rate multiplied by 60, or `increase()`). Explain when to use `rate` vs `increase`.
+7. Compare `rate(...[30s])` and `rate(...[5m])` on the same graph. Describe how they differ.
+
+**Part C: Error ratio**
+8. Overall error ratio (5xx / total).
+9. Error ratio per `path`.
+10. Success ratio (as a percentage) for `POST /orders` only.
+
+**Part D: Latency**
+11. p50, p95, and p99 latency for the whole service.
+12. p95 per `path`.
+13. Average latency using `_sum` and `_count`. Graph it next to p95 and explain the gap.
+14. The fraction of requests faster than 200 ms, using a single bucket (an Apdex-style or SLO-style query).
+
+**Part E: Runtime and process metrics**
+15. Current goroutine count, and the goroutine count's change over the last 10 minutes.
+16. Memory in use (`process_resident_memory_bytes`) converted to MiB.
+17. CPU usage of the app as a fraction of one core (a rate of `process_cpu_seconds_total`).
+18. GC activity: how often garbage collection runs per second.
+
+**Part F: Health and platform queries**
+19. How many targets are up, and which targets are down?
+20. The number of series Prometheus currently holds (`prometheus_tsdb_head_series`), and which metric names have the most series (hint: `topk` with `count by (__name__)`).
+
+**Part G: Break it on purpose**
+21. Add a temporary `time.Sleep(2s)` to `GET /orders/{id}` and a spike of 50% failures to `POST /orders`. Restart, and find the problem **using only PromQL**: which endpoint is slow, which is failing, and since when. Revert afterwards.
+
+## Concepts you should understand
+
+**Data model recap.** A time series is identified by a metric name plus labels. A *sample* is a (timestamp, value) pair. PromQL doesn't query "rows"; it queries sets of series.
+
+**The four result types.**
+- **Instant vector:** one value per series at a single moment (`up`).
+- **Range vector:** a window of samples per series (`up[5m]`). Only functions like `rate()` can consume it.
+- **Scalar:** a single number.
+- **String:** rarely used.
+
+Most PromQL confusion comes from not knowing which type you have. A typical pattern is *range vector → function → instant vector → aggregation*.
+
+**`rate()` in depth.** For a counter, `rate(x[5m])` is the per-second average increase across the 5-minute window, and it automatically handles counter resets (from a restart). Points that matter:
+- The window must contain **at least two samples** to produce a value. With a 5s scrape interval, `[1m]` is safe. The common rule is a window of at least 4× the scrape interval.
+- Small windows are reactive but noisy. Large windows are smooth but hide short spikes. This is the tension behind most dashboard and alert tuning.
+- `rate()` is for counters. For gauges you use `deriv()` or just the raw value. Using `rate()` on a gauge gives meaningless results.
+- Never take `sum()` of raw counters and then `rate()` the result. The order matters: **rate first, then aggregate**. Aggregating first breaks counter-reset detection.
+- `irate()` uses just the last two samples. It's good for spiky, fast-moving graphs but bad for alerting.
+
+**Aggregation operators.** `sum`, `avg`, `min`, `max`, `count`, `topk`, plus `by (label)` to *keep* labels and `without (label)` to *drop* labels. Every aggregation removes the labels you don't keep, so the question to ask yourself is "what dimensions do I want left in my result?"
+
+**Vector matching.** When you divide two vectors (errors / total), Prometheus matches series with identical label sets. If the numerator has `status` and the denominator doesn't, they won't match and you'll get an empty result. This is why you aggregate both sides to the same labels first (`sum by (path)`). Look up `on()`, `ignoring()` and `group_left` for the non-trivial cases.
+
+**Division by zero and missing data.** If no requests occurred, the denominator vector is empty or 0, and the ratio is `NaN` or missing. In alerts this matters: "no data" and "0 errors" are different situations. Think about how each should be handled, and look up `or vector(0)` and `absent()`.
+
+**`histogram_quantile()` in depth.** It takes the *rate* of the bucket counters, grouped by `le`:
+
+`histogram_quantile(0.95, sum by (le) (rate(..._bucket[5m])))`
+
+- You must keep the `le` label in the `by` clause. If you drop it, the query returns nothing.
+- To get per-endpoint results, keep both: `sum by (le, path)`.
+- The result is an *estimate* made by linear interpolation inside the bucket. A bad bucket layout gives misleading numbers, for example a p99 that "sticks" to a bucket boundary. Check this against your own results.
+- Requests above the highest finite bucket are clamped to it. This is why a bucket near the top of your range matters.
+
+**Averages vs percentiles.** Average latency = `rate(_sum) / rate(_count)`. It's cheap, and it's useful for trends, but outliers hide in it. Compare it to your p95 in step 13 and notice what the average misses.
+
+**Staleness and lookback.** An instant query returns the most recent sample within the last 5 minutes (the lookback delta). If a target disappears, its series is marked stale. This is why a dead app's series don't just freeze on the graph.
+
+**Why PromQL skills matter in production.** Every dashboard panel, alert rule and SLO calculation is a PromQL expression. Most on-call debugging at companies using Prometheus starts with exactly the queries in Parts B-D.
+
+## Hints
+- Use the UI's metric browser and autocomplete (type part of a name).
+- Use the **Table** tab to see raw instant results and the **Graph** tab for time ranges.
+- `{status=~"5.."}` is the regex matcher. `!=` and `!~` are the negations.
+- For step 14, remember that a bucket's `le` label is a *string* and the bucket is cumulative. Divide one bucket's rate by the `_count` rate. Make sure `0.2` is actually one of your bucket boundaries, and if it isn't, think about what that tells you about bucket design.
+- For step 20, `count by (__name__) ({__name__=~".+"})` is expensive on big systems. Why is that OK here but dangerous in production?
+- For step 21, compare per-path latency and error ratio before and after your change, and also set the graph time range so you can see the moment of the change.
+
+## How to verify
+- Part B: the total rate should match your load generator's request rate (roughly, in requests/sec).
+- Part C: the overall error ratio should be a bit under 5% before step 21.
+- Part D: p95 for `POST /orders` should be around 285 ms. Check that your p50 is around 155 ms given the uniform 10-300 ms delay. If p50 and p95 differ from that a lot, check your buckets.
+- Part E: the CPU fraction should be small (a Go app doing sleeps and light work), and the goroutine count should be stable, not growing.
+- Part G: you should be able to diagnose the injected faults **using only queries**, without reading code or logs.
+- Cross-check with the app: pick one counter, `curl /metrics` yourself, and see that it matches what the UI shows at that moment.
+
+## Questions to answer
+1. Why is `sum(rate(x[5m]))` correct but `rate(sum(x)[5m])` wrong (or not even valid)?
+2. A teammate computes error ratio as `sum(orderly_http_requests_total{status=~"5.."}) / sum(orderly_http_requests_total)` without `rate()`. What does that number mean, and why is it a bad alerting signal?
+3. Why must `le` be preserved in a `histogram_quantile` query?
+4. For step 13, what does the average hide that the p95 shows? Give a concrete production scenario.
+5. If the scrape interval is 15s, what's the smallest sensible range window for `rate()`, and why?
